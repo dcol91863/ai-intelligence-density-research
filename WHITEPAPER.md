@@ -2,382 +2,465 @@
 
 ## A Whitepaper on Improving Capability per Byte, per Watt, and per Unit of Active Compute
 
-Version 1.0
+Version 2.0
 
 ## Abstract
 
-Current AI progress is often discussed in terms of raw scale: larger datasets, larger clusters, larger parameter counts, and longer context windows. That framing is incomplete. In many practical settings, the more important objective is not absolute scale, but `intelligence density`: the amount of useful capability delivered per byte of model storage, per unit of memory bandwidth, and per unit of active computation.
+AI systems are still commonly evaluated through raw scale: larger models, larger training runs, and larger serving clusters. That framing is incomplete. In practical deployment, what matters at least as much is `intelligence density`: the amount of useful capability a system delivers per byte of stored model state, per unit of active memory, and per unit of active computation.
 
-This whitepaper proposes a concrete framework for improving intelligence density in modern AI systems. The central claim is that the next major gains in deployable AI performance will come less from unbounded parameter growth and more from algorithmic improvements that increase capability per stored weight and per active operation.
+This whitepaper proposes a concrete program for increasing intelligence density in modern AI systems. The central claim is that the next major gains in deployable AI will come from algorithmic improvements that increase capability per stored weight and per active operation, rather than from checkpoint growth alone.
 
-The most promising current directions are:
+The strongest current directions are:
 
-1. teacher-student distillation into compact architectures
+1. distillation into compact students
 2. low-bit and mixed-precision quantization
 3. codebook and additive quantization for extreme compression
 4. low-rank factorization and parameter sharing
 5. sparse and conditional computation
-6. runtime memory compression, especially KV-cache compression
+6. KV-cache compression for long-context systems
 
-This paper argues that these directions should be evaluated under a unified metric family centered on capability per GB, quality per active FLOP, and service throughput per watt. It proposes a practical roadmap for researchers, model builders, and infrastructure teams seeking to improve AI efficiency without sacrificing useful intelligence.
+This paper defines a mathematical framework for intelligence density, analyzes each algorithmic lever under that framework, and proposes system-specific recommendations for LLMs, vision systems, on-device models, and API-scale inference stacks.
 
 ## 1. Introduction
 
-The dominant scaling paradigm in AI has produced strong results, but it also creates structural inefficiencies:
+The dominant scaling paradigm in AI has produced strong capability gains, but it also creates structural inefficiencies:
 
-- checkpoint sizes are growing faster than deployment convenience
-- memory bandwidth is often the real inference bottleneck
-- replication and serving costs rise sharply with model size
-- edge and mobile deployment remain constrained by file size and runtime memory
-- long-context systems pay a heavy memory tax through cache growth
+- checkpoints are becoming expensive to move, store, and replicate
+- memory bandwidth often dominates inference cost
+- long-context inference incurs heavy cache growth
+- edge deployment remains constrained by model size and runtime memory
+- service density is limited by active model and cache footprint rather than by total FLOPs alone
 
-As a result, a useful AI system should not only be judged by total benchmark performance. It should also be judged by how efficiently it converts stored parameters and active compute into behavior.
+As a result, a useful AI system should be judged not only by benchmark quality, but also by how efficiently it converts storage, memory, and compute into behavior.
 
-That is the motivation for the concept of `intelligence density`.
+This is the motivation for the concept of `intelligence density`.
 
 In operational terms, intelligence density means improving:
 
 - capability per model byte on disk
 - capability per GB of active memory
-- capability per token of active compute
-- service quality per unit infrastructure cost
+- capability per unit of active FLOPs
+- service quality per unit of infrastructure cost
 
-This framing aligns with a broader industry shift toward efficiency-aware AI development. It is also consistent with recent public commentary that competitive advantage may increasingly come from higher intelligence density rather than from raw hardware scale alone.
+This framing is consistent with a growing efficiency-centered view of AI progress. It also matches recent public discussion around raising “intelligence density” rather than relying purely on raw scale. For broader context on AI risk, alignment, and deployment priorities, see [Super AI Safety](https://www.superaisafety.com).
 
 ## 2. Defining Intelligence Density
 
-The term should be made precise enough to evaluate.
+A useful definition must be measurable.
 
-We define intelligence density as a family of measurable efficiencies:
+Let:
+
+- `Q(M)` be a task-quality functional for model `M`
+- `S(M)` be checkpoint size in bytes
+- `R(M)` be active runtime memory in bytes
+- `C(M)` be active compute cost, such as FLOPs or joules per query
+- `D(M)` be deployment cost per useful query or per unit time
+
+We define four density metrics.
 
 ### 2.1 Storage Density
 
-Capability per unit of checkpoint size.
-
-Examples:
-
-- benchmark score per GB
-- task success rate per GB
-- retrieval quality per MB on-device
+`ID_storage(M) = Q(M) / S(M)`
 
 ### 2.2 Memory Density
 
-Capability per unit of active runtime memory.
-
-Examples:
-
-- throughput per GB VRAM
-- long-context quality per GB cache
-- concurrent sessions per host memory footprint
+`ID_memory(M) = Q(M) / R(M)`
 
 ### 2.3 Compute Density
 
-Capability per active FLOP or per watt.
-
-Examples:
-
-- tokens/sec at fixed accuracy
-- requests/sec at fixed latency and quality
-- robotic control performance per watt on embedded hardware
+`ID_compute(M) = Q(M) / C(M)`
 
 ### 2.4 Deployment Density
 
-Practical value delivered per unit of total operational cost.
+`ID_deploy(M) = Q(M) / D(M)`
 
-Examples:
+A serious efficiency program should optimize all four metrics jointly rather than optimizing parameter count in isolation.
 
-- users served per model host
-- edge deployment feasibility at fixed thermal limits
-- replication speed across regions or devices
-
-A serious efficiency agenda should optimize across all four, not just parameter count.
-
-## 3. The Core Hypothesis
+## 3. Core Hypothesis
 
 The core hypothesis of this whitepaper is:
 
 `The next large practical gains in AI will come from increasing intelligence density faster than raw model scale increases.`
 
-This does not imply that scaling is over. It implies that scaling alone is a weak optimization target when:
+This does not mean scaling stops mattering. It means scaling alone is often the wrong optimization target when:
 
-- memory dominates runtime cost
+- memory dominates runtime
 - deployment environments are constrained
-- latency matters
-- model replication must be cheap
-- user-facing quality can be preserved through compression-aware training
+- latency and replication matter
+- serving cost matters more than benchmark peak score
+- quality can be preserved through compression-aware training
 
-In other words, bigger models remain useful, but denser models are often more valuable.
+In many real systems, denser models are more valuable than merely larger ones.
 
-## 4. Algorithmic Levers for Increasing Intelligence Density
+## 4. A Mathematical Decomposition of the Problem
 
-## 4.1 Distillation
+For a model with `N` parameters and average precision `b` bits per parameter, the first-order checkpoint size is:
 
-Distillation is the strongest current method for improving quality per byte.
+`S ~= N * b / 8 + O(metadata)`
 
-### Why it matters
+For autoregressive inference with context length `L`, hidden size `d`, `n_layers` layers, and cache precision `b_kv`, runtime cache cost scales approximately as:
 
-A smaller student trained to imitate a stronger teacher often preserves high-level behavior far better than a comparably sized compressed model produced by pruning alone.
+`R_kv = Theta(L * n_layers * d * b_kv)`
 
-### Strengths
+For dense transformer inference, active compute per token is approximately:
 
-- improves capability per parameter
-- can target specific task distributions
-- works well with later quantization
-- supports specialized deployment tiers
+`C_dense = Theta(n_layers * d^2 + attention_cost)`
 
-### Weaknesses
+The goal of intelligence-density improvement is therefore to raise `Q` while reducing one or more of:
 
-- requires retraining
-- teacher quality strongly affects student ceiling
-- may inherit teacher biases and failure modes
+- `N`
+- `b`
+- active routed parameters
+- cache precision or cache length burden
+- effective compute per query
 
-### Recommendation
+Each algorithmic lever below can be understood as changing one of these variables.
 
-Use distillation whenever retraining is feasible and the goal is best quality per file size, not merely smaller storage.
+## 5. Algorithmic Levers and Their Mathematical Improvement Paths
 
-## 4.2 Quantization
+## 5.1 Distillation
 
-Quantization remains the most direct and practical checkpoint compression method.
+Distillation improves `Q` at a smaller `N`.
 
-### Why it matters
+Let `T` be a teacher and `S` a student. The student minimizes a loss of the form:
 
-Modern models contain substantial numerical redundancy. Representing many parameters at 8-bit or 4-bit precision can preserve most useful behavior while dramatically reducing storage and memory traffic.
+`L = alpha * L_task + beta * KL(p_T || p_S) + gamma * L_repr`
 
-### Strengths
+where:
 
-- immediate 2x to 4x storage reduction in common settings
-- strong hardware ecosystem support for INT8 and increasingly for 4-bit inference
-- compatible with post-training or quantization-aware methods
+- `L_task` is the supervised or RL objective
+- `KL(p_T || p_S)` transfers teacher behavior
+- `L_repr` optionally aligns hidden states or intermediate features
 
-### Weaknesses
+### Mathematical effect
 
-- the lowest bitwidth regimes remain fragile
-- some layers and outlier channels are highly precision-sensitive
-- toolchain support varies by model class and hardware stack
+If the original large model has density:
 
-### Recommendation
+`ID_storage(T) = Q(T) / S(T)`
 
-Default to 4-bit or mixed low-bit quantization for dense LLM deployment, unless hardware constraints or quality targets justify 8-bit instead.
+and distillation yields a student with:
 
-## 4.3 Codebook and Additive Quantization
+- `Q(S) = rho * Q(T)` with `rho < 1`
+- `S(S) = sigma * S(T)` with `sigma << 1`
 
-This is the strongest direction for extreme compression.
+then storage density improves when:
 
-### Why it matters
+`rho / sigma > 1`
 
-Scalar quantization is convenient but not always optimal. Codebook-based methods compress weights through learned compositions, allowing much smaller effective storage with better fidelity than naive ultra-low-bit quantization.
+### How to improve distillation further
 
-### Strengths
+1. Optimize `KL` weighting per layer or token type rather than globally.
+2. Distill not just outputs but uncertainty structure and tool-use behavior.
+3. Distill into architectures explicitly designed for low-bit quantization.
+4. Use curriculum distillation so smaller students first learn easier distributions.
 
-- strongest current path to very small checkpoints
-- can reach roughly 2-bit effective compression regimes
-- preserves quality better than simplistic scalar compression at the same nominal bitwidth
+## 5.2 Quantization
 
-### Weaknesses
+Quantization reduces `b`, the number of bits per stored parameter.
 
-- more complex kernels and runtime support
-- less standardized deployment tooling
-- harder to integrate into existing serving stacks
+With scalar quantization, a weight tensor `W` is represented as:
 
-### Recommendation
+`W_hat = s * Q(W / s)`
 
-Use for edge distribution, bandwidth-limited deployment, or archival compression when maximizing bytes saved is more important than tooling simplicity.
+where `Q` maps values to a discrete set and `s` is a scale factor.
 
-## 4.4 Low-Rank Factorization and Parameter Sharing
+### Mathematical effect
 
-These methods reduce model size structurally rather than numerically.
+Checkpoint size changes from:
 
-### Why it matters
+`S_fp16 ~= N * 16 / 8`
 
-Some large matrices are overparameterized relative to the function they compute. Factoring or sharing them can reduce checkpoint size while preserving much of their expressivity.
+to:
 
-### Strengths
+`S_q ~= N * b / 8 + S_scales + S_zero_points`
 
-- architecture-level compression
-- useful for transformers and vision backbones
-- often composes well with quantization
+For large `N`, overhead terms are small, so compression ratio is approximately:
 
-### Weaknesses
+`CR ~= 16 / b`
 
-- usually requires retraining or at least adaptation
-- poor factorization choices can destroy quality
+Thus:
 
-### Recommendation
+- `b = 8` gives about `2x`
+- `b = 4` gives about `4x`
 
-Best used when model owners control training or finetuning and want size reduction that remains architecturally interpretable.
+The quality loss is driven by quantization error:
 
-## 4.5 Sparse and Conditional Computation
+`E_q = ||W - W_hat||`
 
-Sparse routing improves active intelligence density more than static file size.
+More precisely, downstream degradation often correlates with curvature-weighted error:
 
-### Why it matters
+`Delta L ~= (1/2) * (W - W_hat)^T H (W - W_hat)`
 
-Mixture-of-experts and conditional computation let the model keep large total capacity while using only part of it per token or example.
+where `H` is a local Hessian approximation.
 
-### Strengths
+### How to improve quantization further
 
-- improves active compute efficiency
-- can increase capacity without proportional active FLOPs
-- useful for large-scale serving systems
+1. Use Hessian-aware or sensitivity-aware bit allocation.
+2. Use mixed precision so sensitive layers get more bits.
+3. Use outlier channel isolation for large-magnitude or high-curvature weights.
+4. Train models to be quantization-robust rather than only compressing them post hoc.
 
-### Weaknesses
+## 5.3 Codebook and Additive Quantization
 
-- total checkpoint size may remain large
-- infra complexity rises sharply
-- routing instability and communication overhead can offset gains
+Codebook methods replace direct scalar storage with compositional representations.
 
-### Recommendation
+A weight vector `w` is approximated as:
 
-Use when serving infrastructure is mature enough to benefit from lower active compute, not when simple file-size reduction is the primary objective.
+`w_hat = c_1[i_1] + c_2[i_2] + ... + c_m[i_m]`
 
-## 4.6 KV-Cache Compression
+where:
 
-Long-context systems require a dedicated memory-efficiency strategy.
+- `c_j` are learned codebooks
+- `i_j` are small integer indices
 
-### Why it matters
+### Mathematical effect
 
-For many inference systems, runtime cache dominates memory. That means checkpoint compression alone does not solve the real deployment bottleneck.
+Storage becomes approximately:
 
-### Strengths
+`S_codebook ~= n_indices * log2(K) / 8 + S_codebooks`
 
-- improves concurrent serving density
-- lowers long-context latency pressure
-- addresses one of the largest hidden costs in real-world deployment
+where `K` is codebook size.
 
-### Weaknesses
+When `S_codebooks` is amortized across many weights, the effective bits per weight can become much smaller than scalar `INT4` while maintaining lower reconstruction error than naive ultra-low-bit scalar quantization.
 
-- does not directly shrink checkpoint files
-- must be integrated carefully to avoid quality loss in long-range reasoning
+The optimization target becomes:
 
-### Recommendation
+`min_{c_j, i_j} ||W - W_hat||_F^2`
 
-Treat KV-cache compression as mandatory for large-scale long-context serving work.
+or, more usefully,
 
-## 5. System-Specific Recommendations
+`min Delta L(W_hat)`
 
-## 5.1 LLMs
+under a strict storage budget.
 
-### Best current stack
+### How to improve codebook quantization further
 
-1. distill to a smaller dense student if retraining is available
+1. Learn codebooks jointly with a task loss rather than only reconstruction loss.
+2. Use layer-specific codebook budgets based on curvature or saliency.
+3. Optimize serving kernels so runtime overhead does not erase the storage win.
+4. Hybridize scalar quantization and codebooks by layer type.
+
+## 5.4 Low-Rank Factorization and Parameter Sharing
+
+A matrix `W in R^{m x n}` can be approximated as:
+
+`W_hat = A B^T`
+
+with rank `r << min(m, n)`.
+
+### Mathematical effect
+
+Original storage:
+
+`S_full ~= m n b / 8`
+
+Compressed storage:
+
+`S_lr ~= r(m + n)b / 8`
+
+Compression is favorable when:
+
+`r(m + n) < mn`
+
+The approximation error is tied to neglected singular values:
+
+`||W - W_hat||_F^2 = sum_{i > r} sigma_i^2`
+
+### How to improve low-rank compression further
+
+1. Allocate rank by layer using singular-value decay and downstream sensitivity.
+2. Use adaptive rank schedules instead of one global rank.
+3. Combine factorization with quantization: first reduce rank, then reduce `b`.
+4. Share factors across repeated blocks where representations are similar.
+
+## 5.5 Sparse and Conditional Computation
+
+Sparse systems keep total parameters high while reducing active parameters per query.
+
+In a mixture-of-experts system with `E` experts and top-`k` routing, the total parameter count may scale like:
+
+`N_total = N_shared + sum_{e=1}^E N_e`
+
+but active parameters per token are:
+
+`N_active = N_shared + sum_{j=1}^k N_{e_j}`
+
+with `k << E`.
+
+### Mathematical effect
+
+If quality scales with total capacity but compute scales with active capacity, then compute density improves when:
+
+`Q(N_total) / C(N_active)`
+
+rises faster than a dense baseline’s:
+
+`Q_dense(N_dense) / C_dense(N_dense)`
+
+### How to improve sparse systems further
+
+1. Reduce routing entropy collapse through better load balancing losses.
+2. Minimize communication overhead so `C` reflects expert sparsity gains in reality.
+3. Use conditional precision as well as conditional routing.
+4. Quantize inactive or cold experts more aggressively than hot experts.
+
+## 5.6 KV-Cache Compression
+
+For autoregressive models, runtime memory grows with context length. If the key and value caches have shape roughly `(L, n_layers, d)`, then runtime memory scales as:
+
+`R_kv = Theta(L * n_layers * d * b_kv)`
+
+### Mathematical effect
+
+Lowering cache precision from `b_kv = 16` to `b_kv = 8` halves cache memory approximately. Lowering to `4` bits gives approximately `4x` compression if kernel and metadata overhead remain controlled.
+
+The challenge is preserving attention quality. If compressed keys and values are `K_hat, V_hat`, the attention perturbation is approximately controlled by:
+
+`Delta A ~= softmax(Q K_hat^T / sqrt(d)) - softmax(Q K^T / sqrt(d))`
+
+and downstream quality degradation depends on how cache compression changes attention distributions over long horizons.
+
+### How to improve KV compression further
+
+1. Use recency-aware or saliency-aware precision allocation.
+2. Keep high-importance cache segments at higher precision.
+3. Combine eviction, summarization, and low-bit storage.
+4. Optimize for end-to-end retrieval and reasoning quality rather than cache reconstruction error alone.
+
+## 6. Cross-Lever Composition
+
+The strongest improvements come from composition, not isolated methods.
+
+A practical objective is:
+
+`max Q(M)` subject to:
+
+- `S(M) <= S_max`
+- `R(M) <= R_max`
+- `C(M) <= C_max`
+- `D(M) <= D_max`
+
+The best current recipe is typically:
+
+1. reduce `N` through distillation or factorization
+2. reduce `b` through quantization
+3. reduce `R_kv` through cache compression
+4. reduce active `C` through routing or batching-aware execution
+
+## 7. System-Specific Recommendations
+
+## 7.1 LLMs
+
+Best near-term stack:
+
+1. distill to a smaller dense student when retraining is possible
 2. quantize to 4-bit or mixed low-bit precision
 3. compress KV cache for long-context serving
 4. use codebook quantization if distribution size is critical
 
-### Why
+Primary target:
 
-LLMs are typically bottlenecked by memory bandwidth, checkpoint distribution cost, and cache growth. The densest practical stack therefore combines model-size reduction with runtime memory reduction.
+`max Q / (lambda_s S + lambda_r R + lambda_c C)`
 
-## 5.2 Vision Models
+## 7.2 Vision Models
 
-### Best current stack
+Best near-term stack:
 
 1. low-rank or structured compression
 2. INT8 or 4-bit quantization
 3. selective structured pruning only after validation
 
-### Why
+Primary target:
 
-Vision systems often respond well to structural compression, but deployment success depends heavily on kernel support and hardware-specific operator performance.
+`min ||W - W_hat||` subject to throughput and memory constraints.
 
-## 5.3 On-Device Models
+## 7.3 On-Device Models
 
-### Best current stack
+Best near-term stack:
 
-1. low-bit quantization
+1. aggressive quantization
 2. distillation into compact architectures
-3. architecture redesign for bandwidth and thermals
-4. codebook quantization if deployment toolchain permits
+3. bandwidth-aware model redesign
+4. codebook quantization if tooling permits
 
-### Why
+Primary target:
 
-On-device deployment is dominated by storage, RAM, thermals, and memory traffic. Every unnecessary byte harms usability.
+`max Q / (S + eta R + mu Power)`
 
-## 5.4 API-Scale Inference Systems
+## 7.4 API-Scale Inference Systems
 
-### Best current stack
+Best near-term stack:
 
 1. 4-bit or 8-bit quantization
 2. KV-cache compression
 3. distillation for service tiering
-4. sparse routing where infrastructure supports it
+4. sparse routing where infra supports it
 
-### Why
+Primary target:
 
-At API scale, operational memory and throughput usually matter more than the static checkpoint artifact alone.
+`max revenue_weighted(Q) / infrastructure_cost`
 
-## 6. What Should Be Deprioritized
+## 8. Proposed Evaluation Standard
 
-Not every compression method is equally promising.
+Efficiency research should report more than benchmark score.
 
-The following should generally not be a first-line strategy:
-
-- naive unstructured magnitude pruning
-- ultra-low-bit compression without recovery training
-- compression schemes unsupported by serving hardware
-- benchmark-only optimization without deployment metrics
-
-Compression work that looks impressive in parameter-count terms can still fail on actual quality-per-byte and production utility.
-
-## 7. A Proposed Evaluation Standard
-
-Research on efficient AI should report more than raw benchmark scores.
-
-We propose the following minimum evaluation table:
+Minimum reporting should include:
 
 1. checkpoint size on disk
-2. active VRAM or RAM during inference
+2. active memory during inference
 3. throughput at fixed quality
 4. latency at fixed quality
-5. long-context memory growth
+5. cache growth under long contexts
 6. benchmark score per GB
-7. benchmark score per watt where feasible
+7. benchmark score per watt where possible
 
-This would make it much easier to compare methods under a true intelligence-density framework.
+A useful summary table should therefore report:
 
-## 8. Proposed Research Program
+`[Q, S, R, C, D, Q/S, Q/R, Q/C]`
 
-To materially improve intelligence density over the next 2 to 3 years, the most promising coordinated program is:
+for all major model variants.
 
-### Phase 1: Better Compact Teachers and Students
+## 9. Research Program
 
-- improve compact architecture search
-- optimize distillation objectives for reasoning and tool use
-- target compact students that quantize well
+The most promising coordinated program for increasing intelligence density over the next few years is:
 
-### Phase 2: Compression-Aware Training
+### Phase 1: Compact students
 
-- train models to be robust to 4-bit and codebook quantization
-- integrate quantization constraints directly into optimization
-- learn sensitivity maps for layer-wise precision allocation
+- architecture search for quantization-friendly students
+- better distillation objectives for reasoning, tools, and retrieval
+- student models optimized directly for file-size-constrained deployment
 
-### Phase 3: Runtime Memory Compression
+### Phase 2: Compression-aware training
 
-- compress KV caches without destroying retrieval or reasoning
-- optimize dynamic activation precision
-- improve serving kernels for mixed-precision and codebook formats
+- learn layer sensitivity and curvature-aware bit allocation
+- integrate low-bit robustness into training
+- make codebook methods deployment-friendly
 
-### Phase 4: Conditional Computation
+### Phase 3: Runtime memory compression
 
-- improve routing reliability
-- reduce sparse-system operational complexity
-- optimize active quality per FLOP, not just total capacity
+- compress KV caches without harming long-range reasoning
+- use saliency-aware cache precision
+- optimize serving kernels for compressed states
 
-## 9. Strategic Implications
+### Phase 4: Active-efficiency systems
 
-If intelligence density becomes the dominant optimization target, several shifts follow:
+- improve sparse routing reliability
+- reduce communication overhead in expert systems
+- condition precision and compute jointly
+
+## 10. Strategic Implications
+
+If intelligence density becomes the dominant optimization target, several consequences follow:
 
 - smaller but denser models become more commercially valuable
-- model evaluation should focus more on deployable efficiency
-- hardware advantage becomes less absolute when algorithms improve memory efficiency
-- edge and mobile AI become materially more competitive
-- serving economics improve even without frontier-scale hardware expansion
+- deployment-aware evaluation becomes more important than parameter count alone
+- hardware advantage remains important, but algorithmic memory efficiency matters more
+- edge and mobile AI become more competitive
+- service margins improve even without frontier-scale hardware growth
 
-This matters strategically because the most usable AI systems are not always the largest ones. They are often the systems that fit operational constraints best while preserving enough intelligence to be useful.
+## 11. Conclusion
 
-## 10. Conclusion
-
-The frontier in AI is no longer only about adding more parameters. It is also about using parameters better.
+The frontier in AI is no longer only about adding more parameters. It is about using parameters, bits, memory, and active compute more effectively.
 
 The most important algorithmic improvements for this goal are now visible:
 
@@ -390,7 +473,7 @@ The most important algorithmic improvements for this goal are now visible:
 
 Together, these methods point toward a future in which AI progress is measured not only by total capability, but by capability density.
 
-That is the practical meaning of intelligence density, and it is a better north star for deployable AI than raw scale alone.
+That is the operational meaning of intelligence density, and it is a stronger optimization target for deployable AI than raw scale alone.
 
 ## References
 
