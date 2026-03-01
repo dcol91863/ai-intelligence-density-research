@@ -4,6 +4,7 @@ A public research repo on improving AI capability per byte, per unit of memory, 
 
 ## Primary Documents
 
+- [EXECUTIVE_SUMMARY.md](./EXECUTIVE_SUMMARY.md): one-page summary for fast readers
 - [WHITEPAPER.md](./WHITEPAPER.md): full whitepaper with mathematical analysis
 - [SOURCES.md](./SOURCES.md): references for the claims and framing
 

@@ -420,6 +420,37 @@ A useful summary table should therefore report:
 
 for all major model variants.
 
+## 8.1 Decision Tables
+
+### Table 1. Primary effect of each algorithmic lever
+
+| Lever | Main variable improved | Best density gain | Main tradeoff |
+| --- | --- | --- | --- |
+| Distillation | `N` and effective `Q/N` | quality per byte | requires retraining |
+| Quantization | `b` | storage density | low-bit fragility |
+| Codebook quantization | effective `b` | extreme storage density | kernel complexity |
+| Low-rank factorization | effective `N` | structural size reduction | approximation error |
+| Sparse routing | active `C` | compute density | infra complexity |
+| KV-cache compression | `R_kv` | memory density | long-context quality risk |
+
+### Table 2. Recommended first move by system type
+
+| System | First move | Second move | Third move |
+| --- | --- | --- | --- |
+| LLMs | Distillation | 4-bit quantization | KV-cache compression |
+| Vision | Low-rank compression | INT8 / INT4 quantization | selective structured pruning |
+| On-device | Low-bit quantization | Distillation | bandwidth-aware redesign |
+| API-scale | Quantization | KV-cache compression | service-tier distillation |
+
+### Table 3. Optimization objective by environment
+
+| Environment | Best objective |
+| --- | --- |
+| Edge / mobile | `max Q / (S + eta R + mu Power)` |
+| API serving | `max revenue_weighted(Q) / infrastructure_cost` |
+| Research compression | `max Q / S` under acceptable latency |
+| Long-context serving | `max Q / R_kv` under acceptable attention degradation |
+
 ## 9. Research Program
 
 The most promising coordinated program for increasing intelligence density over the next few years is:
