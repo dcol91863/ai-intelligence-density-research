@@ -1,6 +1,11 @@
 # Intelligence Density
 
-Research notes on improving AI system efficiency by file size, memory footprint, and deployable capability per parameter byte.
+Research notes and a whitepaper on improving AI system efficiency by file size, memory footprint, and deployable capability per parameter byte.
+
+## Primary Document
+
+- [WHITEPAPER.md](./WHITEPAPER.md): full proposal on increasing AI intelligence density
+- [SOURCES.md](./SOURCES.md): source list for the claims and framing
 
 This repo uses the term `intelligence density` as shorthand for:
 
